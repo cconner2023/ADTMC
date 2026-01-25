@@ -1,43 +1,45 @@
-// Simple Service Worker for ADTMC - FIXED VERSION
-const CACHE_NAME = 'adtmc-v2.6';
-const APP_VERSION = '2.6';
+// sw.js
+const APP_VERSION = '3.0.0'; // Increment this on every update
+const CACHE_NAME = `adtmc-cache-${APP_VERSION}`;
 
-// Files to cache on install - ONLY UNIQUE URLs
-const CORE_ASSETS = [];
+// List of files to cache with version query strings
+const CORE_ASSETS = [
+    '/ADTMC/index.html',
+    '/ADTMC/manifest.json',
+    '/ADTMC/App.tsx',
+    '/ADTMC/App.css',
+];
 
 self.addEventListener('install', (event) => {
     console.log('[Service Worker] Installing version:', APP_VERSION);
-    self.skipWaiting();
 
     event.waitUntil(
         caches.open(CACHE_NAME)
             .then((cache) => {
                 console.log('[SW] Caching core assets');
-                // Use Promise.all to avoid duplicate requests
-                const cachePromises = CORE_ASSETS.map(url =>
-                    cache.add(url).catch(err =>
-                        console.warn(`[SW] Failed to cache ${url}:`, err)
-                    )
-                );
-                return Promise.all(cachePromises);
+                return cache.addAll(CORE_ASSETS.map(url => `${url}?v=${APP_VERSION}`));
             })
+            .then(() => self.skipWaiting())
     );
 });
 
 self.addEventListener('activate', (event) => {
-    console.log('[Service Worker] Activating');
+    console.log('[Service Worker] Activating version:', APP_VERSION);
 
     event.waitUntil(
         caches.keys().then((cacheNames) => {
             return Promise.all(
                 cacheNames.map((cacheName) => {
-                    if (cacheName !== CACHE_NAME) {
-                        console.log('[Service Worker] Deleting old cache:', cacheName);
+                    if (!cacheName.startsWith('adtmc-cache-') || cacheName !== CACHE_NAME) {
+                        console.log('[SW] Deleting old cache:', cacheName);
                         return caches.delete(cacheName);
                     }
                 })
             );
-        }).then(() => self.clients.claim())
+        }).then(() => {
+            // Claim all clients immediately
+            return self.clients.claim();
+        })
     );
 });
 
@@ -47,93 +49,90 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // For navigation requests, use network-first strategy
-    if (event.request.mode === 'navigate') {
+    // For HTML pages, use network-first strategy
+    if (event.request.mode === 'navigate' ||
+        event.request.headers.get('accept')?.includes('text/html')) {
         event.respondWith(
             fetch(event.request)
                 .then((response) => {
-                    // Update cache with fresh response
+                    // Clone response for cache
                     const responseClone = response.clone();
-                    caches.open(CACHE_NAME).then((cache) => {
-                        cache.put(event.request, responseClone);
-                    });
+                    caches.open(CACHE_NAME)
+                        .then(cache => cache.put(event.request, responseClone));
                     return response;
                 })
                 .catch(() => {
-                    // If network fails, try cache
                     return caches.match('/ADTMC/index.html');
                 })
         );
         return;
     }
 
-    // For other requests, use cache-first strategy
+    // For static assets, use cache-first with network fallback
     event.respondWith(
         caches.match(event.request)
             .then((cachedResponse) => {
-                // Return cached response if available
-                if (cachedResponse) {
-                    // Update cache in background
-                    fetchAndUpdate(event.request);
-                    return cachedResponse;
-                }
-
-                // Otherwise fetch from network
-                return fetch(event.request)
-                    .then((response) => {
-                        // Don't cache if not successful or if it's an API request
-                        if (response.ok && !event.request.url.includes('/api/')) {
-                            const responseClone = response.clone();
-                            caches.open(CACHE_NAME).then((cache) => {
-                                cache.put(event.request, responseClone);
-                            });
-                        }
-                        return response;
+                // Always try to update from network in background
+                const fetchPromise = fetch(event.request)
+                    .then((networkResponse) => {
+                        // Update cache with fresh response
+                        const responseClone = networkResponse.clone();
+                        caches.open(CACHE_NAME)
+                            .then(cache => cache.put(event.request, responseClone));
+                        return networkResponse;
+                    })
+                    .catch(() => {
+                        // Network failed - do nothing
                     });
+
+                // Return cached response immediately, network response updates cache in background
+                return cachedResponse || fetchPromise;
             })
     );
 });
 
-// Background update check
-function fetchAndUpdate(request) {
-    fetch(request)
-        .then((response) => {
-            if (response.ok) {
-                caches.open(CACHE_NAME).then((cache) => {
-                    cache.match(request).then((cachedResponse) => {
-                        if (cachedResponse) {
-                            // Compare responses
-                            Promise.all([
-                                cachedResponse.text(),
-                                response.clone().text()
-                            ]).then(([cachedText, networkText]) => {
-                                if (cachedText !== networkText) {
-                                    // Update cache
-                                    cache.put(request, response.clone());
-
-                                    // Notify clients
-                                    self.clients.matchAll().then((clients) => {
-                                        clients.forEach((client) => {
-                                            client.postMessage({
-                                                type: 'UPDATE_AVAILABLE',
-                                                timestamp: Date.now()
-                                            });
-                                        });
-                                    });
-                                }
-                            });
-                        }
-                    });
-                });
-            }
-        })
-        .catch(() => {
-            // Ignore network errors in background update
-        });
-}
-
 self.addEventListener('message', (event) => {
-    if (event.data === 'skipWaiting') {
-        self.skipWaiting();
+    console.log('[SW] Received message:', event.data);
+
+    if (event.data && event.data.type === 'SKIP_WAITING') {
+        console.log('[SW] Skip waiting requested');
+        self.skipWaiting().then(() => {
+            console.log('[SW] Successfully skipped waiting');
+            // Now the new worker will activate
+        });
     }
 });
+
+// Check for updates periodically
+self.addEventListener('periodicsync', (event) => {
+    if (event.tag === 'check-for-updates') {
+        event.waitUntil(checkForUpdates());
+    }
+});
+
+async function checkForUpdates() {
+    const cache = await caches.open(CACHE_NAME);
+    const requests = await cache.keys();
+
+    for (const request of requests) {
+        try {
+            const networkResponse = await fetch(request);
+            const cachedResponse = await cache.match(request);
+
+            if (cachedResponse &&
+                networkResponse.headers.get('etag') !== cachedResponse.headers.get('etag')) {
+                // Update found - notify clients
+                const clients = await self.clients.matchAll();
+                clients.forEach(client => {
+                    client.postMessage({
+                        type: 'UPDATE_AVAILABLE',
+                        url: request.url
+                    });
+                });
+                break;
+            }
+        } catch (error) {
+            // Ignore failed fetches
+        }
+    }
+}
