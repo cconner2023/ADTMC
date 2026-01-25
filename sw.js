@@ -1,13 +1,11 @@
 // sw.js
-const APP_VERSION = '3.0.0'; // Increment this on every update
+const APP_VERSION = '3.0'; // Increment this on every update
 const CACHE_NAME = `adtmc-cache-${APP_VERSION}`;
 
 // List of files to cache with version query strings
 const CORE_ASSETS = [
     '/ADTMC/index.html',
     '/ADTMC/manifest.json',
-    '/ADTMC/App.tsx',
-    '/ADTMC/App.css',
 ];
 
 self.addEventListener('install', (event) => {
@@ -91,15 +89,10 @@ self.addEventListener('fetch', (event) => {
     );
 });
 
+// Handle messages from client
 self.addEventListener('message', (event) => {
-    console.log('[SW] Received message:', event.data);
-
     if (event.data && event.data.type === 'SKIP_WAITING') {
-        console.log('[SW] Skip waiting requested');
-        self.skipWaiting().then(() => {
-            console.log('[SW] Successfully skipped waiting');
-            // Now the new worker will activate
-        });
+        self.skipWaiting();
     }
 });
 
