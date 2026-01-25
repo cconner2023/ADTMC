@@ -1,4 +1,3 @@
-// sw.js
 const APP_VERSION = '3.0'; // Increment this on every update
 const CACHE_NAME = `adtmc-cache-${APP_VERSION}`;
 
