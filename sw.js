@@ -1,149 +1,152 @@
+// public/sw.js (or in your ADTMC directory)
 const APP_VERSION = '3.0';
 const CACHE_NAME = `adtmc-cache-${APP_VERSION}`;
 
-// Use relative paths for GitHub Pages
 const CORE_ASSETS = [
-    './',
-    './index.html',
-    './manifest.json',
-    './App.css'
+    '/ADTMC/',
+    '/ADTMC/index.html',
+    '/ADTMC/App.css',
+    '/ADTMC/manifest.json'
 ];
 
 self.addEventListener('install', (event) => {
-    console.log('[Service Worker] Installing version:', APP_VERSION);
+    console.log('[SW] Installing version:', APP_VERSION);
 
+    // Skip waiting to activate immediately
+    event.waitUntil(self.skipWaiting());
+
+    // Cache files with better error handling
     event.waitUntil(
         caches.open(CACHE_NAME)
             .then((cache) => {
-                console.log('[SW] Caching core assets:', CORE_ASSETS);
-                // Don't add version query strings to URLs in cache.addAll()
-                return cache.addAll(CORE_ASSETS);
+                console.log('[SW] Caching core assets');
+                return Promise.allSettled(
+                    CORE_ASSETS.map(url =>
+                        fetch(url)
+                            .then(response => {
+                                if (response.ok) {
+                                    return cache.put(url, response);
+                                }
+                                throw new Error(`Failed to fetch ${url}: ${response.status}`);
+                            })
+                            .catch(error => {
+                                console.warn('[SW] Failed to cache:', url, error.message);
+                                return null;
+                            })
+                    )
+                );
             })
             .then(() => {
-                console.log('[SW] All core assets cached successfully');
-                return self.skipWaiting();
-            })
-            .catch((error) => {
-                console.error('[SW] Cache addAll failed:', error);
-                throw error;
+                console.log('[SW] Installation complete');
             })
     );
 });
 
 self.addEventListener('activate', (event) => {
-    console.log('[Service Worker] Activating version:', APP_VERSION);
+    console.log('[SW] Activating version:', APP_VERSION);
 
     event.waitUntil(
-        caches.keys()
-            .then((cacheNames) => {
+        Promise.all([
+            // Clean up old caches
+            caches.keys().then(cacheNames => {
                 return Promise.all(
-                    cacheNames.map((cacheName) => {
-                        // Delete old caches
+                    cacheNames.map(cacheName => {
                         if (cacheName.startsWith('adtmc-cache-') && cacheName !== CACHE_NAME) {
                             console.log('[SW] Deleting old cache:', cacheName);
                             return caches.delete(cacheName);
                         }
                     })
                 );
-            })
-            .then(() => {
-                // Take control of all clients immediately
-                return self.clients.claim();
-            })
-            .then(() => {
-                console.log('[SW] Activation complete');
-            })
+            }),
+            // Take control immediately
+            self.clients.claim()
+        ])
     );
 });
 
 self.addEventListener('fetch', (event) => {
-    // Skip non-GET requests
-    if (event.request.method !== 'GET') {
+    // Only handle GET requests within our scope
+    if (event.request.method !== 'GET' ||
+        !event.request.url.includes('/ADTMC/')) {
         return;
     }
 
-    // Skip chrome-extension and other non-http requests
-    if (!event.request.url.startsWith('http')) {
-        return;
-    }
-
-    const requestUrl = new URL(event.request.url);
-
-    // Handle navigation requests (HTML pages)
-    if (event.request.mode === 'navigate') {
-        event.respondWith(
-            caches.match('./index.html')
-                .then((cachedResponse) => {
-                    // Always try to fetch from network first for navigation
-                    return fetch(event.request)
-                        .then((networkResponse) => {
-                            // Update cache in background
-                            const responseClone = networkResponse.clone();
-                            caches.open(CACHE_NAME)
-                                .then(cache => cache.put(event.request, responseClone));
-                            return networkResponse;
-                        })
-                        .catch(() => {
-                            // If network fails, return cached index.html
-                            return cachedResponse || new Response('Network error');
-                        });
-                })
-        );
-        return;
-    }
-
-    // For static assets, use cache-first strategy
     event.respondWith(
         caches.match(event.request)
-            .then((cachedResponse) => {
-                // Return cached response if available
-                if (cachedResponse) {
-                    // Update cache in background
-                    fetch(event.request)
-                        .then((networkResponse) => {
-                            if (networkResponse.ok) {
-                                const responseClone = networkResponse.clone();
-                                caches.open(CACHE_NAME)
-                                    .then(cache => cache.put(event.request, responseClone));
-                            }
-                        })
-                        .catch(() => {
-                            // Ignore network errors for background updates
-                        });
-                    return cachedResponse;
-                }
+            .then(cachedResponse => {
+                const fetchAndCache = fetch(event.request)
+                    .then(networkResponse => {
+                        // Only cache successful responses
+                        if (networkResponse.ok) {
+                            const clone = networkResponse.clone();
+                            caches.open(CACHE_NAME)
+                                .then(cache => cache.put(event.request, clone));
 
-                // If not in cache, fetch from network
-                return fetch(event.request)
-                    .then((networkResponse) => {
-                        // Don't cache non-successful responses
-                        if (!networkResponse.ok) {
-                            return networkResponse;
+                            // Check if content changed
+                            checkForContentChange(event.request, clone);
                         }
-
-                        // Cache the successful response
-                        const responseClone = networkResponse.clone();
-                        caches.open(CACHE_NAME)
-                            .then(cache => cache.put(event.request, responseClone));
-
                         return networkResponse;
                     })
-                    .catch((error) => {
-                        console.error('[SW] Fetch failed:', error);
-                        // Return error response for failed fetches
-                        return new Response('Network error', {
-                            status: 408,
-                            headers: { 'Content-Type': 'text/plain' }
-                        });
+                    .catch(() => {
+                        // Network failed - return cached or nothing
+                        if (event.request.mode === 'navigate') {
+                            return caches.match('/ADTMC/index.html');
+                        }
+                        return null;
                     });
+
+                // Return cached if available, otherwise fetch
+                return cachedResponse || fetchAndCache;
             })
     );
 });
 
-// Handle messages from client
+// Check if content has changed
+async function checkForContentChange(request, networkResponse) {
+    try {
+        const cache = await caches.open(CACHE_NAME);
+        const cachedResponse = await cache.match(request);
+
+        if (!cachedResponse) return;
+
+        const [cachedText, networkText] = await Promise.all([
+            cachedResponse.text(),
+            networkResponse.clone().text()
+        ]);
+
+        if (cachedText !== networkText) {
+            console.log('[SW] Content changed:', request.url);
+
+            const clients = await self.clients.matchAll();
+            clients.forEach(client => {
+                client.postMessage({
+                    type: 'CONTENT_UPDATED',
+                    url: request.url
+                });
+            });
+        }
+    } catch (error) {
+        console.warn('[SW] Error checking content:', error);
+    }
+}
+
+// Handle messages from the app
 self.addEventListener('message', (event) => {
-    if (event.data && event.data.type === 'SKIP_WAITING') {
-        console.log('[SW] Received skip waiting message');
-        self.skipWaiting();
+    if (event.data?.type === 'SKIP_WAITING') {
+        self.skipWaiting().then(() => self.clients.claim());
+    }
+
+    if (event.data?.type === 'CHECK_UPDATES') {
+        // Check specific URLs for updates
+        const urls = event.data.urls || CORE_ASSETS;
+        urls.forEach(url => {
+            fetch(url)
+                .then(response => {
+                    if (response.ok) {
+                        return checkForContentChange(new Request(url), response);
+                    }
+                })
+                .catch(error => console.warn('[SW] Update check failed:', url, error));
+        });
     }
 });
