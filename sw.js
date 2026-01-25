@@ -1,27 +1,24 @@
-// sw.js - Keep it simple
-const APP_VERSION = '3.0';
+// sw.js
+const APP_VERSION = '3.0'; // Increment this on every update
 const CACHE_NAME = `adtmc-cache-${APP_VERSION}`;
 
-// List of files to cache
+// List of files to cache with version query strings
 const CORE_ASSETS = [
-    '/ADTMC/',
     '/ADTMC/index.html',
     '/ADTMC/manifest.json',
     '/ADTMC/App.css'
 ];
-
 self.addEventListener('install', (event) => {
     console.log('[Service Worker] Installing version:', APP_VERSION);
     event.waitUntil(
         caches.open(CACHE_NAME)
             .then((cache) => {
                 console.log('[SW] Caching core assets');
-                return cache.addAll(CORE_ASSETS);
+                return cache.addAll(CORE_ASSETS.map(url => `${url}?v=${APP_VERSION}`));
             })
             .then(() => self.skipWaiting())
     );
 });
-
 self.addEventListener('activate', (event) => {
     console.log('[Service Worker] Activating version:', APP_VERSION);
 
@@ -29,28 +26,37 @@ self.addEventListener('activate', (event) => {
         caches.keys().then((cacheNames) => {
             return Promise.all(
                 cacheNames.map((cacheName) => {
-                    if (cacheName.startsWith('adtmc-cache-') && cacheName !== CACHE_NAME) {
+                    if (!cacheName.startsWith('adtmc-cache-') || cacheName !== CACHE_NAME) {
                         console.log('[SW] Deleting old cache:', cacheName);
                         return caches.delete(cacheName);
                     }
                 })
             );
         }).then(() => {
+            // Claim all clients immediately
             return self.clients.claim();
         })
     );
 });
 
 self.addEventListener('fetch', (event) => {
-    // Skip non-GET requests
-    if (event.request.method !== 'GET') {
+    // Skip non-GET requests and cross-origin requests
+    if (event.request.method !== 'GET' || !event.request.url.startsWith(self.location.origin)) {
         return;
     }
 
-    // For navigation, try network first
-    if (event.request.mode === 'navigate') {
+    // For HTML pages, use network-first strategy
+    if (event.request.mode === 'navigate' ||
+        event.request.headers.get('accept')?.includes('text/html')) {
         event.respondWith(
             fetch(event.request)
+                .then((response) => {
+                    // Clone response for cache
+                    const responseClone = response.clone();
+                    caches.open(CACHE_NAME)
+                        .then(cache => cache.put(event.request, responseClone));
+                    return response;
+                })
                 .catch(() => {
                     return caches.match('/ADTMC/index.html');
                 })
@@ -58,38 +64,66 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // For other assets, cache-first
+    // For static assets, use cache-first with network fallback
     event.respondWith(
         caches.match(event.request)
             .then((cachedResponse) => {
-                // Return cached if found
-                if (cachedResponse) {
-                    return cachedResponse;
-                }
-
-                // Otherwise fetch from network
-                return fetch(event.request)
-                    .then((response) => {
-                        // Don't cache non-successful responses
-                        if (!response.ok) {
-                            return response;
-                        }
-
-                        // Cache the response
-                        const responseClone = response.clone();
+                // Always try to update from network in background
+                const fetchPromise = fetch(event.request)
+                    .then((networkResponse) => {
+                        // Update cache with fresh response
+                        const responseClone = networkResponse.clone();
                         caches.open(CACHE_NAME)
-                            .then(cache => {
-                                cache.put(event.request, responseClone);
-                            });
-                        return response;
+                            .then(cache => cache.put(event.request, responseClone));
+                        return networkResponse;
+                    })
+                    .catch(() => {
+                        // Network failed - do nothing
                     });
+
+                // Return cached response immediately, network response updates cache in background
+                return cachedResponse || fetchPromise;
             })
     );
 });
 
-// Handle skip waiting message
+// Handle messages from client
 self.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'SKIP_WAITING') {
         self.skipWaiting();
     }
 });
+
+// Check for updates periodically
+self.addEventListener('periodicsync', (event) => {
+    if (event.tag === 'check-for-updates') {
+        event.waitUntil(checkForUpdates());
+    }
+});
+
+async function checkForUpdates() {
+    const cache = await caches.open(CACHE_NAME);
+    const requests = await cache.keys();
+
+    for (const request of requests) {
+        try {
+            const networkResponse = await fetch(request);
+            const cachedResponse = await cache.match(request);
+
+            if (cachedResponse &&
+                networkResponse.headers.get('etag') !== cachedResponse.headers.get('etag')) {
+                // Update found - notify clients
+                const clients = await self.clients.matchAll();
+                clients.forEach(client => {
+                    client.postMessage({
+                        type: 'UPDATE_AVAILABLE',
+                        url: request.url
+                    });
+                });
+                break;
+            }
+        } catch (error) {
+            // Ignore failed fetches
+        }
+    }
+}
