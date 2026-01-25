@@ -6,11 +6,10 @@ const CACHE_NAME = `adtmc-cache-${APP_VERSION}`;
 const CORE_ASSETS = [
     '/ADTMC/index.html',
     '/ADTMC/manifest.json',
+    '/ADTMC/App.css'
 ];
-
 self.addEventListener('install', (event) => {
     console.log('[Service Worker] Installing version:', APP_VERSION);
-
     event.waitUntil(
         caches.open(CACHE_NAME)
             .then((cache) => {
@@ -20,7 +19,6 @@ self.addEventListener('install', (event) => {
             .then(() => self.skipWaiting())
     );
 });
-
 self.addEventListener('activate', (event) => {
     console.log('[Service Worker] Activating version:', APP_VERSION);
 
