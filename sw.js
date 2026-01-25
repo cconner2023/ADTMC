@@ -5,7 +5,6 @@ const CACHE_NAME = `adtmc-cache-${APP_VERSION}`;
 const CORE_ASSETS = [
     '/ADTMC/',
     '/ADTMC/index.html',
-    '/ADTMC/App.css',
     '/ADTMC/manifest.json'
 ];
 
