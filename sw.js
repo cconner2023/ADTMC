@@ -1,42 +1,24 @@
-// sw.js
+// sw.js - Keep it simple
 const APP_VERSION = '3.0';
-const CACHE_NAME = `adtmc-cache-v${APP_VERSION}`;
+const CACHE_NAME = `adtmc-cache-${APP_VERSION}`;
 
-// Only cache essential files that definitely exist
+// List of files to cache
 const CORE_ASSETS = [
-    './',  // This will cache index.html
-    './index.html',
-    './manifest.json',
-    './App.css'
-    // Add other assets you know exist
+    '/ADTMC/',
+    '/ADTMC/index.html',
+    '/ADTMC/manifest.json',
+    '/ADTMC/App.css'
 ];
 
 self.addEventListener('install', (event) => {
     console.log('[Service Worker] Installing version:', APP_VERSION);
-
-    // Skip waiting immediately during install
-    self.skipWaiting();
-
     event.waitUntil(
         caches.open(CACHE_NAME)
             .then((cache) => {
                 console.log('[SW] Caching core assets');
-                // Use individual add() calls to handle failures gracefully
-                const cachePromises = CORE_ASSETS.map(url => {
-                    return cache.add(url).catch(err => {
-                        console.warn(`[SW] Failed to cache ${url}:`, err);
-                        return Promise.resolve(); // Continue even if one fails
-                    });
-                });
-                return Promise.all(cachePromises);
+                return cache.addAll(CORE_ASSETS);
             })
-            .then(() => {
-                console.log('[SW] Core assets cached successfully');
-            })
-            .catch(error => {
-                console.error('[SW] Cache installation failed:', error);
-                // Don't fail the installation if caching fails
-            })
+            .then(() => self.skipWaiting())
     );
 });
 
@@ -44,94 +26,70 @@ self.addEventListener('activate', (event) => {
     console.log('[Service Worker] Activating version:', APP_VERSION);
 
     event.waitUntil(
-        Promise.all([
-            // Clean up old caches
-            caches.keys().then((cacheNames) => {
-                return Promise.all(
-                    cacheNames.map((cacheName) => {
-                        if (cacheName.startsWith('adtmc-cache-') && cacheName !== CACHE_NAME) {
-                            console.log('[SW] Deleting old cache:', cacheName);
-                            return caches.delete(cacheName);
-                        }
-                    })
-                );
-            }),
-            // Take control immediately
-            self.clients.claim()
-        ]).then(() => {
-            console.log('[SW] Activation complete');
+        caches.keys().then((cacheNames) => {
+            return Promise.all(
+                cacheNames.map((cacheName) => {
+                    if (cacheName.startsWith('adtmc-cache-') && cacheName !== CACHE_NAME) {
+                        console.log('[SW] Deleting old cache:', cacheName);
+                        return caches.delete(cacheName);
+                    }
+                })
+            );
+        }).then(() => {
+            return self.clients.claim();
         })
     );
 });
 
-// Simplified fetch handler
 self.addEventListener('fetch', (event) => {
-    // Skip non-GET requests and cross-origin requests
-    if (event.request.method !== 'GET' ||
-        !event.request.url.startsWith(self.location.origin)) {
+    // Skip non-GET requests
+    if (event.request.method !== 'GET') {
         return;
     }
 
-    // For HTML navigation, try network first, then cache
+    // For navigation, try network first
     if (event.request.mode === 'navigate') {
         event.respondWith(
             fetch(event.request)
                 .catch(() => {
-                    return caches.match('./index.html');
+                    return caches.match('/ADTMC/index.html');
                 })
         );
         return;
     }
 
-    // For other assets, try cache first
+    // For other assets, cache-first
     event.respondWith(
         caches.match(event.request)
-            .then(cachedResponse => {
+            .then((cachedResponse) => {
+                // Return cached if found
                 if (cachedResponse) {
-                    // Update cache in background
-                    fetch(event.request)
-                        .then(networkResponse => {
-                            return caches.open(CACHE_NAME)
-                                .then(cache => cache.put(event.request, networkResponse));
-                        })
-                        .catch(() => { }); // Silently fail background update
                     return cachedResponse;
                 }
 
-                // Not in cache, try network
+                // Otherwise fetch from network
                 return fetch(event.request)
-                    .then(networkResponse => {
-                        // Cache the new response
-                        const responseClone = networkResponse.clone();
+                    .then((response) => {
+                        // Don't cache non-successful responses
+                        if (!response.ok) {
+                            return response;
+                        }
+
+                        // Cache the response
+                        const responseClone = response.clone();
                         caches.open(CACHE_NAME)
-                            .then(cache => cache.put(event.request, responseClone));
-                        return networkResponse;
-                    })
-                    .catch(error => {
-                        console.log('[SW] Fetch failed:', event.request.url, error);
-                        // You could return a fallback here
-                        return new Response('Network error', {
-                            status: 408,
-                            headers: { 'Content-Type': 'text/plain' }
-                        });
+                            .then(cache => {
+                                cache.put(event.request, responseClone);
+                            });
+                        return response;
                     });
             })
     );
 });
 
-// Handle messages from client
+// Handle skip waiting message
 self.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'SKIP_WAITING') {
-        console.log('[SW] Received SKIP_WAITING message');
         self.skipWaiting();
-
-        // Notify all clients to reload
-        self.clients.matchAll().then(clients => {
-            clients.forEach(client => {
-                client.postMessage({
-                    type: 'RELOAD_PAGE'
-                });
-            });
-        });
     }
 });
