@@ -13,9 +13,6 @@ let isUpdating = false;
 
 self.addEventListener('install', (event) => {
     console.log('[SW] Installing version:', APP_VERSION);
-
-    // Don't skip waiting automatically - let the user control it
-    // This prevents the loop
     event.waitUntil(
         caches.open(CACHE_NAME)
             .then((cache) => {
